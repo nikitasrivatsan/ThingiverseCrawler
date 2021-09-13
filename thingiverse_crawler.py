@@ -5,10 +5,10 @@ import datetime
 import os
 import os.path
 import requests
+from requests_html import HTMLSession
 import re
 import time
 import urllib
-import urlparse
 from subprocess import check_call
 
 def utc_mktime(utc_tuple):
@@ -31,9 +31,14 @@ def parse_thing_ids(text):
     return [int(val) for val in matched]
 
 def parse_file_ids(text):
-    pattern = "download:(\d{5,7})"
+    # get explicit stl links
+    pattern = "href=\"([^\"]*\.stl)\""
     matched = re.findall(pattern, text)
-    return [int(val) for val in matched]
+    # reformat id based links
+    pattern = "download:(\d{5,7})"
+    file_ids = re.findall(pattern, text)
+    matched += [get_download_link(int(val)) for val in file_ids]
+    return matched
 
 known_licenses = [
         ("Creative Commons - Attribution",
@@ -119,7 +124,7 @@ def crawl_things(N, output_dir, term=None, category=None, source=None, organize=
         key = term
 
     thing_ids = set()
-    file_ids = set()
+    file_urls = set()
     records = []
     num_files = 0
     page = 0
@@ -131,28 +136,29 @@ def crawl_things(N, output_dir, term=None, category=None, source=None, organize=
         page += 1
 
         # If the previous url ends up being the same as the old one, we should stop as there are no more pages
-        current_path = urlparse.urlparse(contents.url).path
+        current_path = urllib.parse.urlparse(url).path
         if previous_path == current_path:
             return records
         else:
             previous_path = current_path
 
-        for thing_id in parse_thing_ids(contents.text):
+        #for thing_id in parse_thing_ids(contents):
+        for thing_id in svg_things():
             if thing_id in thing_ids:
                 continue
             print("thing id: {}".format(thing_id))
             thing_ids.add(thing_id)
             license, thing_files = get_thing(thing_id)
-            for file_id in thing_files:
-                if file_id in file_ids:
+            for file_url in thing_files:
+                if file_url in file_urls:
                     continue
-                file_ids.add(file_id)
-                print("  file id: {}".format(file_id))
-                result = download_file(file_id, thing_id, output_dir, organize)
+                file_urls.add(file_url)
+                print("  file url: {}".format(file_url))
+                result = download_file(file_url, thing_id, output_dir, organize)
                 if result is None: continue
                 filename, link = result
                 if filename is not None:
-                    records.append((thing_id, file_id, filename, license, link))
+                    records.append((thing_id, file_url, filename, license, link))
                     if N is not None and len(records) >= N:
                         return records
 
@@ -160,57 +166,90 @@ def crawl_things(N, output_dir, term=None, category=None, source=None, organize=
             time.sleep(0.5)
             save_records(records, key)
 
+def svg_things():
+    directory = "/home/nsrivats/Corpora/renders/svg/complete/"
+    thing_ids = set()
+    for filename in os.listdir(directory):
+        thing_id = int(filename.split('_')[0])
+        thing_ids.add(thing_id)
+    return thing_ids
+
 def get_thing(thing_id):
-    base_url = "http://www.thingiverse.com/{}:{}"
+    base_url = "http://www.thingiverse.com/{}:{}/files"
     file_ids = []
 
     url = base_url.format("thing", thing_id)
-    contents = get_url(url).text
+    contents = get_url(url)
     license = parse_license(contents)
     return license, parse_file_ids(contents)
 
-def get_url(url, time_out=600):
-    r = requests.get(url)
+def get_url(url, time_out=10):
+    #r = requests.get(url)
+    try:
+        with HTMLSession() as session:
+            r = session.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            r.html.render(timeout=20, sleep=10)
+            session.close()
+    except:
+        print("failed to retrieve {}".format(url))
+        return ''
+    '''
     sleep_time = 1.0
     while r.status_code != 200:
         print("sleep {}s".format(sleep_time))
         print(url)
         time.sleep(sleep_time)
-        r = requests.get(url)
+        #r = requests.get(url)
+        r = session.get(url)
+        r.html.render(timeout=20)
         sleep_time += 2
         if (sleep_time > time_out):
             # We have sleeped for over 10 minutes, the page probably does
             # not exist.
             break
+    '''
     if r.status_code != 200:
         print("failed to retrieve {}".format(url))
+        return ''
     else:
-        return r
-        # return r.text
+        return r.html.html
+        #return r.content.decode('utf-8')
+        #return r.text
 
 def get_download_link(file_id):
     base_url = "https://www.thingiverse.com/{}:{}"
     url = base_url.format("download", file_id)
-    r = requests.head(url)
-    link = r.headers.get("Location", None)
+    try:
+        r = requests.head(url)
+        link = r.headers.get("Location", None)
+    except:
+        print("failed to retrieve {}".format(base_url))
+        return None
     if link is not None:
         __, ext = os.path.splitext(link)
         if ext.lower() not in [".stl", ".obj", ".ply", ".off"]:
             return None
         return link
 
-def download_file(file_id, thing_id, output_dir, organize):
-    link = get_download_link(file_id)
-    if link is None:
+def download_file(file_url, thing_id, output_dir, organize):
+    #link = get_download_link(file_id)
+    if file_url is None:
         return None
-    __, ext = os.path.splitext(link)
-    output_file = "{}{}".format(file_id, ext.lower())
+    #__, ext = os.path.splitext(file_url)
+    ext = file_url.split('/')[-1]
+    '''
+    output_file = "{}{}".format(file_url, ext.lower())
     if organize:
         output_file = os.path.join(str(thing_id), output_file)
+    '''
+    output_file = "{}_{}".format(thing_id, ext)
     output_file = os.path.join(output_dir, output_file)
-    command = "wget -q --tries=20 --waitretry 20 -O {} {}".format(output_file, link)
-    #check_call(command.split())
-    return output_file, link
+    command = "wget -q --tries=20 --waitretry 20 -O {} {}".format(output_file, file_url)
+    try:
+        check_call(command.split())
+    except:
+        print("Failed to download {}".format(file_url))
+    return output_file, file_url
 
 def save_records(records, key=None):
     # Enforce kebab case file name
