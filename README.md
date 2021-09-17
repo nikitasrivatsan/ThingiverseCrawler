@@ -52,6 +52,10 @@ To get a single file using its `thing_id`
 
 ### Modifed By : ###
 
+Nikita Srivatsan
+
+PhD Student
+
 Mike Gleason
 
 Web Developer
